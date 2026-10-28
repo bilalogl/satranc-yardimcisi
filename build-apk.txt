@@ -1,0 +1,877 @@
+name: Build APK
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.5"
+
+      - name: Proje dosyalarini olustur
+        run: |
+          set -e
+          cat > settings.gradle.kts <<'__END_OF_FILE__'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "ChessHelper"
+          include(":app")
+          __END_OF_FILE__
+          cat > build.gradle.kts <<'__END_OF_FILE__'
+          plugins {
+              id("com.android.application") version "8.2.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.22" apply false
+          }
+          __END_OF_FILE__
+          cat > gradle.properties <<'__END_OF_FILE__'
+          org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          __END_OF_FILE__
+          mkdir -p app
+          cat > app/build.gradle.kts <<'__END_OF_FILE__'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.example.chesshelper"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.example.chesshelper"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+                  ndk { abiFilters += listOf("arm64-v8a") }
+              }
+
+              buildTypes {
+                  release {
+                      isMinifyEnabled = false
+                      proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+                  }
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+              packaging {
+                  jniLibs { useLegacyPackaging = true }
+              }
+          }
+
+          dependencies {
+              implementation("androidx.core:core-ktx:1.12.0")
+              implementation("androidx.appcompat:appcompat:1.6.1")
+          }
+          __END_OF_FILE__
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'__END_OF_FILE__'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+              <application
+                  android:allowBackup="true"
+                  android:icon="@android:drawable/sym_def_app_icon"
+                  android:label="Satranc Yardimcisi"
+                  android:theme="@style/Theme.AppCompat.Light.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".ChessHelperService"
+                      android:enabled="true"
+                      android:exported="false"
+                      android:foregroundServiceType="mediaProjection" />
+
+              </application>
+          </manifest>
+          __END_OF_FILE__
+          mkdir -p app/src/main/kotlin/com/example/chesshelper
+          cat > app/src/main/kotlin/com/example/chesshelper/MainActivity.kt <<'__END_OF_FILE__'
+          package com.example.chesshelper
+
+          import android.Manifest
+          import android.content.Context
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.media.projection.MediaProjectionManager
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.provider.Settings
+          import androidx.activity.result.contract.ActivityResultContracts
+          import androidx.appcompat.app.AppCompatActivity
+          import androidx.core.content.ContextCompat
+
+          class MainActivity : AppCompatActivity() {
+
+              private lateinit var mediaProjectionManager: MediaProjectionManager
+
+              private val notificationPermissionLauncher = registerForActivityResult(
+                  ActivityResultContracts.RequestPermission()
+              ) { checkOverlayPermission() }
+
+              private val overlayPermissionLauncher = registerForActivityResult(
+                  ActivityResultContracts.StartActivityForResult()
+              ) { checkAndRequestScreenCapture() }
+
+              private val screenCaptureLauncher = registerForActivityResult(
+                  ActivityResultContracts.StartActivityForResult()
+              ) { result ->
+                  if (result.resultCode == RESULT_OK && result.data != null) {
+                      val intent = Intent(this, ChessHelperService::class.java).apply {
+                          putExtra("RESULT_CODE", result.resultCode)
+                          putExtra("DATA", result.data)
+                      }
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                          startForegroundService(intent)
+                      } else {
+                          startService(intent)
+                      }
+                  }
+                  finish()
+              }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  mediaProjectionManager =
+                      getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                      ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                      != PackageManager.PERMISSION_GRANTED
+                  ) {
+                      notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                  } else {
+                      checkOverlayPermission()
+                  }
+              }
+
+              private fun checkOverlayPermission() {
+                  if (!Settings.canDrawOverlays(this)) {
+                      val intent = Intent(
+                          Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                          Uri.parse("package:$packageName")
+                      )
+                      overlayPermissionLauncher.launch(intent)
+                  } else {
+                      checkAndRequestScreenCapture()
+                  }
+              }
+
+              private fun checkAndRequestScreenCapture() {
+                  if (Settings.canDrawOverlays(this)) {
+                      screenCaptureLauncher.launch(mediaProjectionManager.createScreenCaptureIntent())
+                  } else {
+                      finish()
+                  }
+              }
+          }
+          __END_OF_FILE__
+          mkdir -p app/src/main/kotlin/com/example/chesshelper
+          cat > app/src/main/kotlin/com/example/chesshelper/BoardRecognizer.kt <<'__END_OF_FILE__'
+          package com.example.chesshelper
+
+          import android.graphics.Bitmap
+          import kotlin.math.abs
+
+          // Her kare 24x24'e küçültülür, kenardan 3 piksel içerideki 18x18 alan analiz edilir
+          private const val CELL = 24
+          private const val MARGIN = 3
+          private const val INNER = CELL - 2 * MARGIN
+          private const val COLOR_DIFF = 45          // arka plan renginden fark eşiği (düşük = daha hassas)
+          private const val OCCUPIED_RATIO = 0.10f   // karenin en az %10'u doluysa taş var say
+          private const val MIN_MATCH = 0.35f        // şablon eşleşme alt sınırı (IoU)
+          private const val PIECE_LETTERS = "PRNBQK" // şablon indeksleri
+
+          /** Okunan pozisyon. grid[rank][file]: rank 0 = 1. sıra, file 0 = a. Büyük harf = beyaz. */
+          class ChessPosition(private val grid: Array<Array<Char?>>) {
+
+              fun placement(): String {
+                  val sb = StringBuilder()
+                  for (rank in 7 downTo 0) {
+                      var empty = 0
+                      for (file in 0 until 8) {
+                          val c = grid[rank][file]
+                          if (c == null) {
+                              empty++
+                          } else {
+                              if (empty > 0) { sb.append(empty); empty = 0 }
+                              sb.append(c)
+                          }
+                      }
+                      if (empty > 0) sb.append(empty)
+                      if (rank > 0) sb.append('/')
+                  }
+                  return sb.toString()
+              }
+
+              /** Rok hakları, şah ve kale başlangıç karelerinde mi diye tahmin edilir. */
+              fun fen(sideToMove: Char): String {
+                  val castling = buildString {
+                      if (grid[0][4] == 'K' && grid[0][7] == 'R') append('K')
+                      if (grid[0][4] == 'K' && grid[0][0] == 'R') append('Q')
+                      if (grid[7][4] == 'k' && grid[7][7] == 'r') append('k')
+                      if (grid[7][4] == 'k' && grid[7][0] == 'r') append('q')
+                  }.ifEmpty { "-" }
+                  return "${placement()} $sideToMove $castling - 0 1"
+              }
+
+              companion object {
+                  /** Son hamleyi kimin yaptığı: karesi boşalan taşın rengi. Belirsizse null. */
+                  fun moverColor(prev: ChessPosition, cur: ChessPosition): Char? {
+                      var white = false
+                      var black = false
+                      for (r in 0 until 8) for (f in 0 until 8) {
+                          val p = prev.grid[r][f]
+                          if (p != null && cur.grid[r][f] == null) {
+                              if (p.isUpperCase()) white = true else black = true
+                          }
+                      }
+                      return when {
+                          white && !black -> 'w'
+                          black && !white -> 'b'
+                          else -> null
+                      }
+                  }
+              }
+          }
+
+          /**
+           * Ekran görüntüsünden tahtayı okur. Taş şablonları oyunun BAŞLANGIÇ konumundan öğrenilir
+           * (calibrate). Sonrasında her kare, arka planından bağımsız bir siluet maskesiyle şablonlara
+           * karşılaştırılır.
+           */
+          class BoardRecognizer {
+
+              private class Cell(val mask: BooleanArray, val bright: Float, val fill: Float) {
+                  val occupied: Boolean get() = fill >= OCCUPIED_RATIO
+              }
+
+              private var templates: Array<Array<BooleanArray>>? = null // [0 beyaz / 1 siyah][parça]
+              private var brightThreshold = 0.5f
+
+              /** true: siyah altta oynuyor */
+              var flipped = false
+                  private set
+
+              val isCalibrated: Boolean get() = templates != null
+
+              private fun imageRow(rank: Int) = if (flipped) rank else 7 - rank
+              private fun imageCol(file: Int) = if (flipped) 7 - file else file
+
+              /** Tahta başlangıç konumundaysa şablonları öğrenir ve true döner. */
+              fun calibrate(board: Bitmap): Boolean {
+                  val cells = readCells(board)
+
+                  for (row in 0 until 8) for (col in 0 until 8) {
+                      val shouldBeOccupied = row <= 1 || row >= 6
+                      if (cells[row][col].occupied != shouldBeOccupied) return false
+                  }
+
+                  var top = 0f
+                  var bottom = 0f
+                  for (col in 0 until 8) {
+                      top += cells[0][col].bright + cells[1][col].bright
+                      bottom += cells[6][col].bright + cells[7][col].bright
+                  }
+                  top /= 16f
+                  bottom /= 16f
+                  if (abs(top - bottom) < 0.15f) return false // renkler ayırt edilemiyor
+
+                  flipped = bottom < top // üst taraf daha açıksa beyaz üsttedir, yani siyah altta
+                  brightThreshold = (top + bottom) / 2f
+
+                  val sums = Array(2) { Array(6) { IntArray(INNER * INNER) } }
+                  val counts = Array(2) { IntArray(6) }
+                  val backRank = intArrayOf(1, 2, 3, 4, 5, 3, 2, 1) // R N B Q K B N R (a..h)
+
+                  for (color in 0..1) {
+                      val backR = if (color == 0) 0 else 7
+                      val pawnR = if (color == 0) 1 else 6
+                      for (file in 0 until 8) {
+                          addSample(cells, file, backR, backRank[file], color, sums, counts)
+                          addSample(cells, file, pawnR, 0, color, sums, counts)
+                      }
+                  }
+
+                  templates = Array(2) { color ->
+                      Array(6) { type ->
+                          BooleanArray(INNER * INNER) { i -> sums[color][type][i] * 2 > counts[color][type] }
+                      }
+                  }
+                  return true
+              }
+
+              private fun addSample(
+                  cells: Array<Array<Cell>>, file: Int, rank: Int, type: Int, color: Int,
+                  sums: Array<Array<IntArray>>, counts: Array<IntArray>
+              ) {
+                  val mask = cells[imageRow(rank)][imageCol(file)].mask
+                  val s = sums[color][type]
+                  for (i in mask.indices) if (mask[i]) s[i]++
+                  counts[color][type]++
+              }
+
+              /** Pozisyonu okur. Okunamıyorsa (animasyon, tanınmayan taş vb.) null döner. */
+              fun read(board: Bitmap): ChessPosition? {
+                  val tpl = templates ?: return null
+                  val cells = readCells(board)
+                  val grid = Array(8) { arrayOfNulls<Char>(8) }
+                  var whiteKings = 0
+                  var blackKings = 0
+
+                  for (rank in 0 until 8) for (file in 0 until 8) {
+                      val cell = cells[imageRow(rank)][imageCol(file)]
+                      if (!cell.occupied) continue
+
+                      val color = if (cell.bright > brightThreshold) 0 else 1
+                      var best = -1
+                      var bestScore = 0f
+                      for (t in 0 until 6) {
+                          val s = iou(cell.mask, tpl[color][t])
+                          if (s > bestScore) { bestScore = s; best = t }
+                      }
+                      if (best < 0 || bestScore < MIN_MATCH) return null
+                      if (best == 0 && (rank == 0 || rank == 7)) return null // piyon 1. veya 8. sırada olamaz
+
+                      val ch = PIECE_LETTERS[best]
+                      grid[rank][file] = if (color == 0) ch else ch.lowercaseChar()
+                      if (best == 5) { if (color == 0) whiteKings++ else blackKings++ }
+                  }
+
+                  if (whiteKings != 1 || blackKings != 1) return null
+                  return ChessPosition(grid)
+              }
+
+              private fun iou(a: BooleanArray, b: BooleanArray): Float {
+                  var inter = 0
+                  var union = 0
+                  for (i in a.indices) {
+                      if (a[i] && b[i]) inter++
+                      if (a[i] || b[i]) union++
+                  }
+                  return if (union == 0) 0f else inter.toFloat() / union
+              }
+
+              private fun readCells(board: Bitmap): Array<Array<Cell>> {
+                  val side = 8 * CELL
+                  val scaled = Bitmap.createScaledBitmap(board, side, side, true)
+                  val px = IntArray(side * side)
+                  scaled.getPixels(px, 0, side, 0, 0, side, side)
+                  if (scaled !== board) scaled.recycle()
+                  return Array(8) { row -> Array(8) { col -> analyzeCell(px, side, row * CELL, col * CELL) } }
+              }
+
+              private fun analyzeCell(px: IntArray, stride: Int, y0: Int, x0: Int): Cell {
+                  // 1) Arka plan rengi: dört köşedeki 2x2 blokların kanal medyanı.
+                  //    Son hamle vurgusu veya yeşil kutu karenin tamamını boyadığı için bunu da kapsar.
+                  val rs = IntArray(16)
+                  val gs = IntArray(16)
+                  val bs = IntArray(16)
+                  var n = 0
+                  for (cy in intArrayOf(0, CELL - 2)) for (cx in intArrayOf(0, CELL - 2)) {
+                      for (dy in 0..1) for (dx in 0..1) {
+                          val p = px[(y0 + cy + dy) * stride + x0 + cx + dx]
+                          rs[n] = (p shr 16) and 0xFF
+                          gs[n] = (p shr 8) and 0xFF
+                          bs[n] = p and 0xFF
+                          n++
+                      }
+                  }
+                  rs.sort(); gs.sort(); bs.sort()
+                  val br = rs[8]
+                  val bg = gs[8]
+                  val bb = bs[8]
+
+                  // 2) Arka plandan farklı pikseller
+                  val raw = BooleanArray(INNER * INNER)
+                  val lum = IntArray(INNER * INNER)
+                  for (y in 0 until INNER) for (x in 0 until INNER) {
+                      val p = px[(y0 + MARGIN + y) * stride + x0 + MARGIN + x]
+                      val r = (p shr 16) and 0xFF
+                      val g = (p shr 8) and 0xFF
+                      val b = p and 0xFF
+                      val i = y * INNER + x
+                      raw[i] = abs(r - br) + abs(g - bg) + abs(b - bb) > COLOR_DIFF
+                      lum[i] = (299 * r + 587 * g + 114 * b) / 1000
+                  }
+
+                  // 3) Siluet: kenardan ulaşılabilen arka planı işaretle, geri kalan her şey taştır.
+                  //    Böylece beyaz taşın içi açık renkli kareyle aynı olsa bile siluet dolu çıkar.
+                  val outside = BooleanArray(INNER * INNER)
+                  val queue = IntArray(INNER * INNER)
+                  var head = 0
+                  var tail = 0
+                  fun seed(i: Int) {
+                      if (!raw[i] && !outside[i]) { outside[i] = true; queue[tail++] = i }
+                  }
+                  for (k in 0 until INNER) {
+                      seed(k)
+                      seed((INNER - 1) * INNER + k)
+                      seed(k * INNER)
+                      seed(k * INNER + INNER - 1)
+                  }
+                  while (head < tail) {
+                      val i = queue[head++]
+                      val y = i / INNER
+                      val x = i % INNER
+                      if (y > 0) seed(i - INNER)
+                      if (y < INNER - 1) seed(i + INNER)
+                      if (x > 0) seed(i - 1)
+                      if (x < INNER - 1) seed(i + 1)
+                  }
+
+                  val mask = BooleanArray(INNER * INNER) { !outside[it] }
+                  var count = 0
+                  var brightCount = 0
+                  for (i in mask.indices) {
+                      if (mask[i]) {
+                          count++
+                          if (lum[i] > 128) brightCount++
+                      }
+                  }
+                  val bright = if (count == 0) 0f else brightCount.toFloat() / count
+                  return Cell(mask, bright, count.toFloat() / mask.size)
+              }
+          }
+          __END_OF_FILE__
+          mkdir -p app/src/main/kotlin/com/example/chesshelper
+          cat > app/src/main/kotlin/com/example/chesshelper/ChessHelperService.kt <<'__END_OF_FILE__'
+          package com.example.chesshelper
+
+          import android.app.Activity
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.Service
+          import android.content.Context
+          import android.content.Intent
+          import android.content.pm.ServiceInfo
+          import android.graphics.Bitmap
+          import android.graphics.PixelFormat
+          import android.hardware.display.DisplayManager
+          import android.hardware.display.VirtualDisplay
+          import android.media.ImageReader
+          import android.media.projection.MediaProjection
+          import android.media.projection.MediaProjectionManager
+          import android.os.Build
+          import android.os.Handler
+          import android.os.HandlerThread
+          import android.os.IBinder
+          import android.os.Looper
+          import android.os.SystemClock
+          import android.util.DisplayMetrics
+          import android.util.Log
+          import android.view.Gravity
+          import android.view.View
+          import android.view.WindowManager
+          import android.widget.FrameLayout
+          import androidx.core.app.NotificationCompat
+          import androidx.core.content.IntentCompat
+          import java.io.BufferedReader
+          import java.io.File
+          import java.io.InputStreamReader
+          import java.io.OutputStreamWriter
+          import java.util.concurrent.ExecutorService
+          import java.util.concurrent.Executors
+          import java.util.concurrent.atomic.AtomicBoolean
+
+          class ChessHelperService : Service() {
+
+              private lateinit var windowManager: WindowManager
+              private var overlayView: FrameLayout? = null
+              private var mediaProjection: MediaProjection? = null
+              private var virtualDisplay: VirtualDisplay? = null
+              private var imageReader: ImageReader? = null
+
+              private var captureThread: HandlerThread? = null
+              private val engineExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+              private val analyzing = AtomicBoolean(false)
+              private var lastProcessed = 0L
+
+              private var stockfishProcess: Process? = null
+              private var stockfishWriter: OutputStreamWriter? = null
+              private var stockfishReader: BufferedReader? = null
+
+              private var screenWidth = 0
+              private var screenHeight = 0
+              private var boardTop = 0
+              private var boardSize = 0
+              private var boardFlipped = false // kalibrasyondan sonra otomatik ayarlanır
+
+              // Tahta okuma durumu (sadece capture thread'inde kullanılır)
+              private val recognizer = BoardRecognizer()
+              private var candidate: ChessPosition? = null
+              private var stable: ChessPosition? = null
+
+              override fun onBind(intent: Intent?): IBinder? = null
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  createNotificationChannel()
+
+                  val notification: Notification = NotificationCompat.Builder(this, "CHESS_CHANNEL")
+                      .setContentTitle("Satranç Yapay Zekası Aktif")
+                      .setContentText("Ekran ve hamleler analiz ediliyor...")
+                      .setSmallIcon(android.R.drawable.ic_dialog_info)
+                      .build()
+
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                      startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+                  } else {
+                      startForeground(1, notification)
+                  }
+
+                  val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_CANCELED)
+                      ?: Activity.RESULT_CANCELED
+                  val data = intent?.let { IntentCompat.getParcelableExtra(it, "DATA", Intent::class.java) }
+
+                  if (resultCode == Activity.RESULT_OK && data != null) {
+                      initStockfish()
+                      setupOverlay()
+                      setupScreenCapture(resultCode, data)
+                  } else {
+                      stopSelf()
+                  }
+
+                  return START_NOT_STICKY
+              }
+
+              private fun setupOverlay() {
+                  windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+                  overlayView = FrameLayout(this).apply {
+                      setBackgroundResource(android.R.color.holo_green_light)
+                      background.alpha = 100 // yarı saydam yeşil hedef karesi
+                      visibility = View.INVISIBLE
+                  }
+
+                  val layoutParams = WindowManager.LayoutParams(
+                      1, 1,
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                          WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                      else
+                          @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                          WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                          WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                          WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                      PixelFormat.TRANSLUCENT
+                  ).apply {
+                      gravity = Gravity.TOP or Gravity.START
+                      x = 0
+                      y = 0
+                  }
+
+                  windowManager.addView(overlayView, layoutParams)
+              }
+
+              private fun setupScreenCapture(resultCode: Int, data: Intent) {
+                  val metrics = DisplayMetrics()
+                  @Suppress("DEPRECATION")
+                  windowManager.defaultDisplay.getRealMetrics(metrics)
+                  screenWidth = metrics.widthPixels
+                  screenHeight = metrics.heightPixels
+
+                  // Varsayım: tahta ekran genişliğinde bir kare ve dikeyde ekranın ortasında.
+                  // Oyununda farklıysa boardTop (ve gerekirse boardSize) değerini ayarla.
+                  boardSize = minOf(screenWidth, screenHeight)
+                  boardTop = (screenHeight - boardSize) / 2
+
+                  val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                  mediaProjection = mpManager.getMediaProjection(resultCode, data)
+
+                  // Android 14+: createVirtualDisplay'den ÖNCE callback kaydedilmeli
+                  mediaProjection?.registerCallback(object : MediaProjection.Callback() {
+                      override fun onStop() { stopSelf() }
+                  }, Handler(Looper.getMainLooper()))
+
+                  captureThread = HandlerThread("capture").also { it.start() }
+                  val handler = Handler(captureThread!!.looper)
+
+                  imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
+                  virtualDisplay = mediaProjection?.createVirtualDisplay(
+                      "ChessCapture", screenWidth, screenHeight, metrics.densityDpi,
+                      DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, imageReader?.surface, null, null
+                  )
+
+                  imageReader?.setOnImageAvailableListener({ reader ->
+                      val image = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
+                      try {
+                          val now = SystemClock.elapsedRealtime()
+                          if (now - lastProcessed < 1000 || analyzing.get()) {
+                              return@setOnImageAvailableListener // finally image.close() yapar
+                          }
+                          lastProcessed = now
+
+                          val plane = image.planes[0]
+                          val pixelStride = plane.pixelStride
+                          val rowPadding = plane.rowStride - pixelStride * screenWidth
+
+                          val full = Bitmap.createBitmap(
+                              screenWidth + rowPadding / pixelStride, screenHeight, Bitmap.Config.ARGB_8888
+                          )
+                          full.copyPixelsFromBuffer(plane.buffer)
+
+                          // Sadece satranç tahtasının olduğu alan
+                          val board = Bitmap.createBitmap(full, 0, boardTop, boardSize, boardSize)
+                          full.recycle()
+
+                          processBoard(board)
+                          board.recycle()
+                      } catch (e: Exception) {
+                          e.printStackTrace()
+                      } finally {
+                          image.close()
+                      }
+                  }, handler)
+              }
+
+              private fun processBoard(board: Bitmap) {
+                  // 1) İlk seferde başlangıç konumundan şablonları öğren
+                  if (!recognizer.isCalibrated) {
+                      if (!recognizer.calibrate(board)) return // tahta henüz başlangıç konumunda değil
+                      boardFlipped = recognizer.flipped
+                      Log.i("ChessHelper", "Kalibrasyon tamam. Siyah altta: $boardFlipped")
+                  }
+
+                  // 2) Pozisyonu oku. İki ardışık karede aynı çıkmalı (animasyon filtresi)
+                  val pos = recognizer.read(board) ?: return
+                  if (pos.placement() != candidate?.placement()) {
+                      candidate = pos
+                      return
+                  }
+
+                  // 3) Değişiklik yoksa bir şey yapma
+                  val prev = stable
+                  if (prev != null && prev.placement() == pos.placement()) return
+                  stable = pos
+                  hideOverlay()
+
+                  // 4) Sıra kimde? Son hamleyi yapanın rengine bakılır
+                  val userColor = if (recognizer.flipped) 'b' else 'w'
+                  val turn: Char = if (prev == null) {
+                      'w' // ilk okuma = başlangıç konumu, beyaz başlar
+                  } else {
+                      when (ChessPosition.moverColor(prev, pos)) {
+                          'w' -> 'b'
+                          'b' -> 'w'
+                          else -> userColor
+                      }
+                  }
+
+                  // 5) Sadece kullanıcının sırasında öneri üret
+                  if (turn == userColor) {
+                      getBestMoveFromStockfish(pos.fen(turn))
+                  }
+              }
+
+              private fun initStockfish() {
+                  engineExecutor.execute {
+                      try {
+                          val engine = File(applicationInfo.nativeLibraryDir, "libstockfish.so")
+                          stockfishProcess = ProcessBuilder(engine.absolutePath)
+                              .redirectErrorStream(true)
+                              .start()
+                          stockfishWriter = OutputStreamWriter(stockfishProcess?.outputStream)
+                          stockfishReader = BufferedReader(InputStreamReader(stockfishProcess?.inputStream))
+
+                          sendStockfishCommand("uci")
+                          waitFor("uciok")
+                          sendStockfishCommand("isready")
+                          waitFor("readyok")
+                      } catch (e: Exception) {
+                          Log.e("ChessHelper", "Stockfish baslatilamadi", e)
+                      }
+                  }
+              }
+
+              private fun waitFor(token: String) {
+                  while (true) {
+                      val line = stockfishReader?.readLine() ?: return
+                      if (line.startsWith(token)) return
+                  }
+              }
+
+              private fun sendStockfishCommand(command: String) {
+                  try {
+                      stockfishWriter?.write(command + "\n")
+                      stockfishWriter?.flush()
+                  } catch (e: Exception) {
+                      e.printStackTrace()
+                  }
+              }
+
+              private fun getBestMoveFromStockfish(fen: String) {
+                  if (!analyzing.compareAndSet(false, true)) return
+
+                  engineExecutor.execute {
+                      try {
+                          sendStockfishCommand("position fen $fen")
+                          sendStockfishCommand("go depth 12")
+
+                          while (true) {
+                              val line = stockfishReader?.readLine() ?: break
+                              if (line.startsWith("bestmove")) {
+                                  val parts = line.split(" ")
+                                  if (parts.size > 1) {
+                                      val move = parts[1] // örn. "e2e4"
+                                      Handler(Looper.getMainLooper()).post { updateOverlayPosition(move) }
+                                  }
+                                  break
+                              }
+                          }
+                      } catch (e: Exception) {
+                          e.printStackTrace()
+                      } finally {
+                          analyzing.set(false)
+                      }
+                  }
+              }
+
+              private fun hideOverlay() {
+                  val view = overlayView ?: return
+                  view.post { view.visibility = View.INVISIBLE }
+              }
+
+              // "e2e4" -> hedef kare (e4) üzerine yeşil kutuyu koyar
+              private fun updateOverlayPosition(bestMove: String) {
+                  if (bestMove.length < 4) return
+                  val file = bestMove[2] - 'a'
+                  val rank = bestMove[3] - '1'
+                  if (file !in 0..7 || rank !in 0..7) return
+
+                  val col = if (boardFlipped) 7 - file else file
+                  val row = if (boardFlipped) rank else 7 - rank
+                  val squareSize = boardSize / 8
+
+                  val view = overlayView ?: return
+                  try {
+                      val params = view.layoutParams as WindowManager.LayoutParams
+                      params.width = squareSize
+                      params.height = squareSize
+                      params.x = col * squareSize
+                      params.y = boardTop + row * squareSize
+                      view.visibility = View.VISIBLE
+                      windowManager.updateViewLayout(view, params)
+                  } catch (e: Exception) {
+                      e.printStackTrace()
+                  }
+              }
+
+              private fun createNotificationChannel() {
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      val channel = NotificationChannel(
+                          "CHESS_CHANNEL", "Satranç Servisi", NotificationManager.IMPORTANCE_LOW
+                      )
+                      getSystemService(NotificationManager::class.java)?.createNotificationChannel(channel)
+                  }
+              }
+
+              override fun onDestroy() {
+                  super.onDestroy()
+                  overlayView?.let {
+                      try { windowManager.removeView(it) } catch (e: Exception) { e.printStackTrace() }
+                  }
+                  imageReader?.close()
+                  virtualDisplay?.release()
+                  mediaProjection?.stop()
+                  captureThread?.quitSafely()
+                  sendStockfishCommand("quit")
+                  engineExecutor.shutdownNow()
+                  stockfishProcess?.destroy()
+              }
+          }
+          __END_OF_FILE__
+
+      - name: Stockfish motorunu ekle
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          mkdir -p sf app/src/main/jniLibs/arm64-v8a
+          if gh release download --repo official-stockfish/Stockfish --pattern 'stockfish-android-armv8.tar' --dir sf; then
+            tar -xf sf/stockfish-android-armv8.tar -C sf
+            BIN=$(find sf -type f -name 'stockfish-android-armv8' | head -n1)
+          else
+            echo "Hazir surum bulunamadi, kaynaktan derleniyor..."
+            git clone --depth 1 https://github.com/official-stockfish/Stockfish.git sf/src-repo
+            export PATH="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+            (cd sf/src-repo/src && make -j4 build ARCH=armv8 COMP=ndk)
+            BIN="$GITHUB_WORKSPACE/sf/src-repo/src/stockfish"
+          fi
+          test -f "$BIN"
+          cp "$BIN" app/src/main/jniLibs/arm64-v8a/libstockfish.so
+          chmod +x app/src/main/jniLibs/arm64-v8a/libstockfish.so
+          ls -l app/src/main/jniLibs/arm64-v8a/
+
+      - name: APK derle
+        run: gradle assembleDebug --no-daemon --stacktrace
+
+      - name: APK dosyasini hazirla
+        run: cp app/build/outputs/apk/debug/app-debug.apk SatrancYardimcisi.apk
+
+      - name: Yedek olarak artifact yukle
+        uses: actions/upload-artifact@v4
+        with:
+          name: SatrancYardimcisi-apk
+          path: SatrancYardimcisi.apk
+
+      - name: Release olustur (dogrudan indirme linki)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Satranc Yardimcisi APK #${{ github.run_number }}
+          files: SatrancYardimcisi.apk
